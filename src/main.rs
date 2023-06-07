@@ -12,12 +12,12 @@ mod topic;
 
 const XPUB_PROXY: &'static str = "inproc://cuckoo_pub_proxy";
 const XSUB_PROXY: &'static str = "inproc://cuckoo_sub_proxy";
-// const BUS_ADDRS: &'static str = "tcp://127.0.0.1:2400";
+const BUS_ADDRS: &'static str = "tcp://127.0.0.1:2400";
 
 
 fn run_publisher(topic: Topic, endpoint: &str) -> anyhow::Result<()> {
 
-    let publisher = Context::new().socket(zmq::XPUB).unwrap();
+    let publisher = Context::new().socket(zmq::PUB).unwrap();
     publisher.bind(endpoint).expect("unable to bind to socket");
 
     while true {
@@ -36,7 +36,7 @@ fn run_publisher(topic: Topic, endpoint: &str) -> anyhow::Result<()> {
 
 fn run_client(client_id: i32, endpoint: &str) -> anyhow::Result<()> {
 
-    let subscriber = Context::new().socket(zmq::XSUB)?;
+    let subscriber = Context::new().socket(zmq::SUB)?;
     subscriber.connect(endpoint)?;
 
     // Topic
@@ -88,16 +88,16 @@ fn main() {
     for v in 0..5 {
         let client = std::thread::spawn(move || {
             println!("Launching subscribers...");
-            run_client(v, XSUB_PROXY).unwrap();
+            run_client(v, BUS_ADDRS).unwrap();
         });
 
     }
 
-    let publisher_topics = vec![Topic::Core, Topic::Events];
+    let publisher_topics = vec![Topic::Core];
     for pt in publisher_topics {
         std::thread::spawn(move || {
             println!("Launching publisher with topic: {}", &pt);
-            run_publisher(pt, XPUB_PROXY).unwrap();
+            run_publisher(pt, BUS_ADDRS).unwrap();
         });
     }
 
