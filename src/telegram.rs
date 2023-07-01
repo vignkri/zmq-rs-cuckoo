@@ -8,18 +8,29 @@ use crate::topic::Topic;
 
 
 #[derive(Debug, Serialize, Deserialize)]
+pub enum Message {
+    Value,
+    PrintMetrics,
+}
+
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Telegram {
     t: SystemTime,
-    value: String
+    value: Message
 }
 
 impl Telegram {
 
-    pub fn build(v: String) -> Self {
+    pub fn build(v: Message) -> Self {
         Self {
             t: SystemTime::now(),
             value: v
         }
+    }
+
+    pub fn get_payload(&self) -> &Message {
+        &self.value
     }
 
     pub fn handled_at(&self) -> u128 {
