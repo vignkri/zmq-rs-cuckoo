@@ -1,4 +1,5 @@
 
+use rand::Rng;
 use telegram::SystemMessage;
 use topic::Topic;
 use zmq::Context;
@@ -48,56 +49,6 @@ impl Metrics {
 }
 
 
-fn run_publisher(topic: Topic, endpoint: &str, system_ch: channel::Receiver<SystemMessage> ) -> anyhow::Result<()> {
-
-    let publisher = Context::new().socket(zmq::PUB).unwrap();
-    publisher.bind(endpoint).expect("unable to bind to socket");
-
-    let message_interval = channel::tick(std::time::Duration::from_millis(1));
-
-    let mut metrics = Metrics::new();
-
-    loop {
-
-        crossbeam::select! {
-            recv(message_interval) -> _msg => {
-                let topic_bytes = topic.to_string();
-                let payload = Telegram::build(telegram::Message::Value);
-                let stringified = serde_json::to_string(&payload)?;
-                publisher.send(topic_bytes.as_bytes(), zmq::SNDMORE)?;
-                publisher.send(stringified.as_bytes(), 0)?;
-                metrics.increment();
-            },
-            recv(system_ch) -> msg => {
-
-                let should_break = if msg.is_ok() {
-                    let topic_bytes = topic.to_string();
-                    let payload = Telegram::build(telegram::Message::Kill);
-                    let stringified = serde_json::to_string(&payload)?;
-                    publisher.send(topic_bytes.as_bytes(), zmq::SNDMORE)?;
-                    publisher.send(stringified.as_bytes(), 0)?;
-
-                    // exiting
-                    true
-                } else {
-                    false
-                };
-
-                if should_break {
-                    tracing::debug!("Received sigkill, exiting");
-                    break;
-                }
-            }
-        };
-    }
-
-    // unbind the publisher
-    tracing::debug!("publisher metrics n_messages={}", &metrics.n_msgs);
-    publisher.unbind(endpoint)?;
-    Ok(())
-}
-
-
 pub fn run_client(client_id: i32, endpoint: &str) -> anyhow::Result<()> {
 
     let subscriber = Context::new().socket(zmq::SUB)?;
@@ -112,6 +63,8 @@ pub fn run_client(client_id: i32, endpoint: &str) -> anyhow::Result<()> {
 
     // subscriber.set_rcvtimeo(60)?;
     let mut metrics = Metrics::new();
+    let mut values: Vec<i32> = vec![];
+    let mut moving_average: Option<f32> = None;
 
     loop {
 
@@ -125,12 +78,24 @@ pub fn run_client(client_id: i32, endpoint: &str) -> anyhow::Result<()> {
             let time_since_publish = telegram.handled_at();
 
             match telegram.get_payload() {
-                telegram::Message::Value => {
+                telegram::Message::Value (v) => {
+                    values.push(*v);
+                    if moving_average.is_none() {
+                        moving_average = Some(*v as f32);
+                    } else {
+                        moving_average = Some((moving_average.unwrap() + *v as f32) / 2.0);
+                    };
+
                     metrics.increment();
                     metrics.add(time_since_publish);
                 },
+                telegram::Message::ComputeValueMean => {
+                    let n = values.len() as f32;
+                    let v_f32 = values.drain(..).sum::<i32>() as f32;
+                    let avg = v_f32 / n;
+                    // tracing::info!("Generated average price: {}", avg);
+                },
                 telegram::Message::Kill => {
-
                     let average_msg_handling_time = metrics.average_secs();
                     tracing::info!("Disconnecting and exiting: {}", &client_id);
                     tracing::info!("client={} n_messages={} avg_time_sec={}", &client_id, &metrics.n_msgs, &average_msg_handling_time);
@@ -161,14 +126,12 @@ fn main() {
     .build()
     .unwrap();
 
-
-
     let client_thread = std::thread::spawn(move || { 
         tracing::info!("Starting client thread");
         let handle = rt.handle();
 
         let mut task_handles = vec![];
-        for v in 0..2 {
+        for v in 0..5 {
             let task = handle.spawn_blocking( move || {
                 tracing::debug!("Launching subscriber... {}", &v);
                 let r = run_client(v, BACKEND);
@@ -178,41 +141,51 @@ fn main() {
         };
     });
 
-    // Generate publisher
-    let publisher_topics: Vec<Topic> = vec![Topic::Core];
-    let mut publisher_handles = vec![];
+    let publisher = Context::new().socket(zmq::PUB).unwrap();
+    publisher.bind(BACKEND).expect("unable to bind to socket");
 
-    let (tx, rx) = channel::bounded::<SystemMessage>(1);
-    for pt in publisher_topics {
-        let receiver = rx.clone();
-        let thh = std::thread::spawn(move || {
-            tracing::debug!("Launching publisher with topic: {}", &pt);
-            run_publisher(pt, BACKEND, receiver).unwrap();
-        });
-        publisher_handles.push(thh);
-    }
+    let value_interval = channel::tick(std::time::Duration::from_micros(10));
+    let avg_interval = channel::tick(std::time::Duration::from_secs(1));
 
+    let mut metrics = Metrics::new();
+
+    let mut rng = rand::thread_rng();
     let instant = std::time::Instant::now();
     loop {
         
-        // if elpased is more than 2 minutes, kill the system
-        if instant.elapsed() > std::time::Duration::from_secs(30) {
-            match tx.send(SystemMessage::Exit) {
-                Ok(_) => {
-                    // do nothing
-                },
-                Err(i) => {
-                    tracing::error!("Unable to send message: {:?}", i);
-                    break;
-                }
+        crossbeam::select! {
+            recv(value_interval) -> _msg => {
+                let topic_bytes = Topic::Core.to_string();
+                let value_created = rng.gen();
+                let payload = Telegram::build(telegram::Message::Value(value_created));
+                let stringified = serde_json::to_string(&payload).unwrap();
+                publisher.send(topic_bytes.as_bytes(), zmq::SNDMORE).unwrap();
+                publisher.send(stringified.as_bytes(), 0).unwrap();
+                metrics.increment();
+            },
+            recv(avg_interval) -> _msg => {
+                let topic_bytes = Topic::Core.to_string();
+                let payload = Telegram::build(telegram::Message::ComputeValueMean);
+                let stringified = serde_json::to_string(&payload).unwrap();
+                publisher.send(topic_bytes.as_bytes(), zmq::SNDMORE).unwrap();
+                publisher.send(stringified.as_bytes(), 0).unwrap();
+                metrics.increment();
             }
+        };
+
+        // if elpased is more than 2 minutes, kill the system
+        if instant.elapsed() > std::time::Duration::from_secs(120) {
+            let topic_bytes = Topic::Core.to_string();
+            let payload = Telegram::build(telegram::Message::Kill);
+            let stringified = serde_json::to_string(&payload).unwrap();
+            publisher.send(topic_bytes.as_bytes(), zmq::SNDMORE).unwrap();
+            publisher.send(stringified.as_bytes(), 0).unwrap();
 
             // allow 2 seconds to cleanup tasks;
             tracing::debug!("Waiting to cleanup");
             std::thread::sleep(std::time::Duration::from_secs(2));
             break;
         }
-        std::thread::sleep(std::time::Duration::from_secs(10));
     }
 
 }

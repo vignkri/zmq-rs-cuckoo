@@ -16,7 +16,8 @@ pub enum SystemMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Message {
-    Value,
+    Value(i32),
+    ComputeValueMean,
     Kill
 }
 

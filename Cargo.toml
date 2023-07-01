@@ -14,3 +14,4 @@ serde_json = { version = "*" }
 anyhow = { version = "*" }
 crossbeam = { version = "*" }
 tokio = { version = "*", features=["full"]}
+rand = { version = "*" }
