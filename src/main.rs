@@ -1,5 +1,5 @@
 
-use tokio::runtime::{Runtime, Handle};
+use telegram::SystemMessage;
 use topic::Topic;
 use zmq::Context;
 use crossbeam::channel;
@@ -28,6 +28,10 @@ impl Metrics {
         self.n_msgs += 1;
     }
 
+    pub fn reset_msg_counter(&mut self) {
+        self.n_msgs = 0;
+    }
+
     pub fn add(&mut self, et: u128) {
         self.elapsed_time.push(et);
     }
@@ -44,13 +48,12 @@ impl Metrics {
 }
 
 
-fn run_publisher(topic: Topic, endpoint: &str) -> anyhow::Result<()> {
+fn run_publisher(topic: Topic, endpoint: &str, system_ch: channel::Receiver<SystemMessage> ) -> anyhow::Result<()> {
 
     let publisher = Context::new().socket(zmq::PUB).unwrap();
     publisher.bind(endpoint).expect("unable to bind to socket");
 
-    let message_interval = channel::tick(std::time::Duration::from_millis(10));
-    let metrics_interval = channel::tick(std::time::Duration::from_secs(30));
+    let message_interval = channel::tick(std::time::Duration::from_millis(1));
 
     let mut metrics = Metrics::new();
 
@@ -65,17 +68,32 @@ fn run_publisher(topic: Topic, endpoint: &str) -> anyhow::Result<()> {
                 publisher.send(stringified.as_bytes(), 0)?;
                 metrics.increment();
             },
-            recv(metrics_interval) -> _msg => {
-                let topic_bytes = topic.to_string();
-                let payload = Telegram::build(telegram::Message::PrintMetrics);
-                let stringified = serde_json::to_string(&payload)?;
-                publisher.send(topic_bytes.as_bytes(), zmq::SNDMORE)?;
-                publisher.send(stringified.as_bytes(), 0)?;
-                tracing::info!("Published: {}", metrics.n_msgs);
+            recv(system_ch) -> msg => {
+
+                let should_break = if msg.is_ok() {
+                    let topic_bytes = topic.to_string();
+                    let payload = Telegram::build(telegram::Message::Kill);
+                    let stringified = serde_json::to_string(&payload)?;
+                    publisher.send(topic_bytes.as_bytes(), zmq::SNDMORE)?;
+                    publisher.send(stringified.as_bytes(), 0)?;
+
+                    // exiting
+                    true
+                } else {
+                    false
+                };
+
+                if should_break {
+                    tracing::debug!("Received sigkill, exiting");
+                    break;
+                }
             }
         };
     }
 
+    // unbind the publisher
+    tracing::debug!("publisher metrics n_messages={}", &metrics.n_msgs);
+    publisher.unbind(endpoint)?;
     Ok(())
 }
 
@@ -95,7 +113,7 @@ pub fn run_client(client_id: i32, endpoint: &str) -> anyhow::Result<()> {
     // subscriber.set_rcvtimeo(60)?;
     let mut metrics = Metrics::new();
 
-    while true {
+    loop {
 
         if let Ok(content) = subscriber.recv_multipart(zmq::SNDMORE) {
             let data = content.iter()
@@ -110,12 +128,13 @@ pub fn run_client(client_id: i32, endpoint: &str) -> anyhow::Result<()> {
                 telegram::Message::Value => {
                     metrics.increment();
                     metrics.add(time_since_publish);
-                }
-                telegram::Message::PrintMetrics => {
-                    // print the metrics
-                    let average_time = metrics.average_nanoseconds();
-                    let average_time_secs = metrics.average_secs();
-                    tracing::info!("{}: {} [{} ns] -> {} s", &client_id, &metrics.n_msgs, &average_time, &average_time_secs);
+                },
+                telegram::Message::Kill => {
+
+                    let average_msg_handling_time = metrics.average_secs();
+                    tracing::info!("Disconnecting and exiting: {}", &client_id);
+                    tracing::info!("client={} n_messages={} avg_time_sec={}", &client_id, &metrics.n_msgs, &average_msg_handling_time);
+                    break;
                 }
             };
         } else {
@@ -125,7 +144,7 @@ pub fn run_client(client_id: i32, endpoint: &str) -> anyhow::Result<()> {
     }
 
     subscriber.disconnect(endpoint)?;
-    tracing::info!("Disconnecting and exiting...");
+    tracing::debug!("Disconnecting and exiting...");
 
     Ok(())
 }
@@ -142,6 +161,8 @@ fn main() {
     .build()
     .unwrap();
 
+
+
     let client_thread = std::thread::spawn(move || { 
         tracing::info!("Starting client thread");
         let handle = rt.handle();
@@ -149,7 +170,7 @@ fn main() {
         let mut task_handles = vec![];
         for v in 0..2 {
             let task = handle.spawn_blocking( move || {
-                tracing::info!("Launching subscriber... {}", &v);
+                tracing::debug!("Launching subscriber... {}", &v);
                 let r = run_client(v, BACKEND);
                 r
             });
@@ -160,10 +181,13 @@ fn main() {
     // Generate publisher
     let publisher_topics: Vec<Topic> = vec![Topic::Core];
     let mut publisher_handles = vec![];
+
+    let (tx, rx) = channel::bounded::<SystemMessage>(1);
     for pt in publisher_topics {
+        let receiver = rx.clone();
         let thh = std::thread::spawn(move || {
-            tracing::info!("Launching publisher with topic: {}", &pt);
-            run_publisher(pt, BACKEND).unwrap();
+            tracing::debug!("Launching publisher with topic: {}", &pt);
+            run_publisher(pt, BACKEND, receiver).unwrap();
         });
         publisher_handles.push(thh);
     }
@@ -172,13 +196,22 @@ fn main() {
     loop {
         
         // if elpased is more than 2 minutes, kill the system
-        if instant.elapsed() > std::time::Duration::from_secs(120) {
-            publisher_handles.iter().for_each(|v| drop(v));
+        if instant.elapsed() > std::time::Duration::from_secs(30) {
+            match tx.send(SystemMessage::Exit) {
+                Ok(_) => {
+                    // do nothing
+                },
+                Err(i) => {
+                    tracing::error!("Unable to send message: {:?}", i);
+                    break;
+                }
+            }
+
+            // allow 2 seconds to cleanup tasks;
+            tracing::debug!("Waiting to cleanup");
+            std::thread::sleep(std::time::Duration::from_secs(2));
             break;
         }
-
-        // Send sigkill? 
-
         std::thread::sleep(std::time::Duration::from_secs(10));
     }
 

@@ -7,10 +7,17 @@ use serde::{ Serialize, Deserialize };
 use crate::topic::Topic;
 
 
+#[derive(Clone)]
+pub enum SystemMessage {
+    Exit
+}
+
+
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Message {
     Value,
-    PrintMetrics,
+    Kill
 }
 
 
