@@ -1,9 +1,11 @@
 use std::fmt::Display;
 
-use serde::{ Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
+/// defines the topic of the system, what to do and what is the
+/// information being passed in the channel
 #[derive(Debug, Serialize, Deserialize)]
-pub enum Topic { 
+pub enum Topic {
     Core,
     Events,
 }

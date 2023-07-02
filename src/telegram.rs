@@ -1,39 +1,39 @@
+//! Telegram
+//!
+//! definitions for the things done internally
+//! in the system for operational purposes
 
+use serde::{Deserialize, Serialize};
+use std::time::SystemTime;
 
-use std::{fmt::Display, time::SystemTime};
-
-use serde::{ Serialize, Deserialize };
-
-use crate::topic::Topic;
-
-
-#[derive(Clone)]
-pub enum SystemMessage {
-    Exit
-}
-
-
-
+/// enumerated message payload that contains the value of the
+/// data being passed
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Message {
     Value(i32),
     ComputeValueMean,
-    Kill
+    Kill,
 }
 
+impl Message {
+    /// generate telegram from the message
+    pub fn to_telegram(self) -> Telegram {
+        Telegram::build(self)
+    }
+}
 
+/// generates the message
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Telegram {
     t: SystemTime,
-    value: Message
+    value: Message,
 }
 
 impl Telegram {
-
     pub fn build(v: Message) -> Self {
         Self {
             t: SystemTime::now(),
-            value: v
+            value: v,
         }
     }
 
@@ -45,4 +45,9 @@ impl Telegram {
         self.t.elapsed().unwrap().as_nanos()
     }
 
+    /// generate byte representation of the data
+    pub fn to_string(&self) -> String {
+        let as_string = serde_json::to_string(&self).unwrap();
+        as_string
+    }
 }
