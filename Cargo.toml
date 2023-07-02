@@ -9,9 +9,12 @@ edition = "2021"
 tracing = { version = "*" }
 tracing-subscriber = { version = "*" }
 zmq = { version = "0.10.0" }
-serde = { version = "*", features = ["derive"] }
+serde = { version = "*", features = ["derive", "rc"] }
 serde_json = { version = "*" }
 anyhow = { version = "*" }
 crossbeam = { version = "*" }
 tokio = { version = "*", features=["full"]}
 rand = { version = "*" }
+
+[profile.release]
+debug = true

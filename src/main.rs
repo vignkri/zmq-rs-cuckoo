@@ -12,7 +12,9 @@ mod topic;
 // location of the backend
 const BACKEND: &'static str = "tcp://127.0.0.1:2400";
 
+/// execute the client within the thread
 pub fn run_client(client_id: i32, endpoint: &str) -> anyhow::Result<()> {
+    // connect to the zeromq system and subscribe to the topics neededticker_msg
     let subscriber = Context::new().socket(zmq::SUB)?;
     subscriber.connect(endpoint)?;
 
@@ -26,10 +28,8 @@ pub fn run_client(client_id: i32, endpoint: &str) -> anyhow::Result<()> {
         tracing::info!("{} Subscribing to topic: {}", &client_id, &t);
     }
 
-    // subscriber.set_rcvtimeo(60)?;
+    // generate a metrics slot for tracking the processing capacity
     let mut metrics = metrics::Metrics::new();
-    let mut values: Vec<i32> = vec![];
-    let mut moving_average: Option<f32> = None;
 
     loop {
         if let Ok(content) = subscriber.recv_multipart(zmq::SNDMORE) {
@@ -48,20 +48,10 @@ pub fn run_client(client_id: i32, endpoint: &str) -> anyhow::Result<()> {
             metrics.add_bytes(processed_size);
 
             match telegram.get_payload() {
-                telegram::Message::Value(v) => {
-                    values.push(*v);
-                    if moving_average.is_none() {
-                        moving_average = Some(*v as f32);
-                    } else {
-                        moving_average = Some((moving_average.unwrap() + *v as f32) / 2.0);
-                    };
-
+                telegram::Message::Data { .. } => {
+                    // todo: handle per symbol, high, low and construct history
                     metrics.increment();
                     metrics.add(time_since_publish);
-                }
-                telegram::Message::ComputeValueMean => {
-                    let n = values.len() as f32;
-                    // tracing::info!("Generated average price: {}", avg);
                 }
                 telegram::Message::Kill => {
                     let average_msg_handling_time = metrics.average_secs();
@@ -91,19 +81,19 @@ fn main() {
     // install global collector configured based on RUST_LOG env var.
     tracing_subscriber::fmt::init();
 
-    // Send a topic and then follow up with a message
+    // build a current-thread runtime
     let rt = tokio::runtime::Builder::new_current_thread()
         .thread_name("clients")
         .enable_all()
         .build()
         .unwrap();
 
-    let client_thread = std::thread::spawn(move || {
+    let _client_threads = std::thread::spawn(move || {
         tracing::info!("Starting client thread");
         let handle = rt.handle();
 
         let mut task_handles = vec![];
-        for v in 0..5 {
+        for v in 0..2 {
             let task = handle.spawn_blocking(move || {
                 tracing::debug!("Launching subscriber... {}", &v);
                 let r = run_client(v, BACKEND);
@@ -117,7 +107,6 @@ fn main() {
     publisher.bind(BACKEND).expect("unable to bind to socket");
 
     let value_interval = channel::tick(std::time::Duration::from_micros(10));
-    let avg_interval = channel::tick(std::time::Duration::from_secs(1));
 
     let mut metrics = metrics::Metrics::new();
 
@@ -125,13 +114,21 @@ fn main() {
     let instant = std::time::Instant::now();
     loop {
         let (msg, topic) = crossbeam::select! {
-            recv(value_interval) -> _msg => {
-                // generate the message
-                let msg = telegram::Message::Value(rng.gen()).to_telegram();
-                (msg, Topic::Core)
-            },
-            recv(avg_interval) -> _msg => {
-                let msg = telegram::Message::ComputeValueMean.to_telegram();
+            recv(value_interval) -> ticker_msg => {
+
+                // if the ticker failed, try to continue and try later
+                if ticker_msg.is_err() {
+                    continue;
+                };
+
+                // generate a message for a single symbol
+                let msg = telegram::Message::Data {
+                    symbol: String::from("AAPL").into(),
+                    high: rng.gen::<f32>(),
+                    low: rng.gen::<f32>(),
+                }.to_telegram();
+
+                // send the message forward
                 (msg, Topic::Core)
             }
         };

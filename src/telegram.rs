@@ -4,14 +4,17 @@
 //! in the system for operational purposes
 
 use serde::{Deserialize, Serialize};
-use std::time::SystemTime;
+use std::{sync::Arc, time::SystemTime};
 
 /// enumerated message payload that contains the value of the
 /// data being passed
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Message {
-    Value(i32),
-    ComputeValueMean,
+    Data {
+        symbol: Arc<str>,
+        high: f32,
+        low: f32,
+    },
     Kill,
 }
 
