@@ -33,6 +33,7 @@ pub struct Telegram {
 }
 
 impl Telegram {
+    /// build a new telegram with the message
     pub fn build(v: Message) -> Self {
         Self {
             t: SystemTime::now(),
@@ -40,10 +41,12 @@ impl Telegram {
         }
     }
 
+    /// get the internal payload
     pub fn get_payload(&self) -> &Message {
         &self.value
     }
 
+    /// get the duration of when the message was constructed and handled
     pub fn handled_at(&self) -> u128 {
         self.t.elapsed().unwrap().as_nanos()
     }

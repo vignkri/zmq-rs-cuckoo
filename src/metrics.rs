@@ -1,3 +1,5 @@
+//! Metrics
+
 /// store information on the number of messages being passed
 /// and handled by the task
 pub struct Metrics {
